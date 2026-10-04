@@ -1,0 +1,2 @@
+mac-installer/scripts/* text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,90 @@
+# Copie de reference de .github/workflows/build-mac-pkg.yml (depot
+# maderino-prod/maderino-downloader). Construit l'installeur .pkg du plugin
+# sur un vrai macOS, le TESTE (installation reelle + verifications), puis
+# l'ajoute a la release plugin-vX.Y.Z. Lancement : onglet Actions du depot,
+# ou `gh workflow run build-mac-pkg.yml -f version=X.Y.Z`.
+name: Installeur Mac du plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version du plugin deja publiee (ex. 2.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  pkg:
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      EXT_ID: com.maderino.premiere.downloader
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recupere l'extension (zip de la release)
+        run: |
+          mkdir -p build
+          gh release download "plugin-v$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --pattern "Maderino.Downloader.Plugin_v$VERSION.zip" --dir build
+          mkdir -p "build/root/$EXT_ID"
+          unzip -q "build/Maderino.Downloader.Plugin_v$VERSION.zip" -d "build/root/$EXT_ID"
+          test -f "build/root/$EXT_ID/CSXS/manifest.xml"
+          grep -q "ExtensionBundleVersion=\"$VERSION\"" "build/root/$EXT_ID/CSXS/manifest.xml"
+          chmod 755 "build/root/$EXT_ID"/bin/mac/*
+          chmod 755 mac-installer/scripts/postinstall
+
+      - name: Construit le .pkg
+        run: |
+          pkgbuild --root build/root \
+            --install-location "/Library/Application Support/Maderino Downloader/staging" \
+            --scripts mac-installer/scripts \
+            --identifier com.maderino.premiere.downloader.installer \
+            --version "$VERSION" \
+            build/component.pkg
+          sed "s/__VERSION__/$VERSION/g" mac-installer/distribution.xml > build/distribution.xml
+          productbuild --distribution build/distribution.xml \
+            --package-path build \
+            --resources mac-installer/resources \
+            "build/MaderinoPluginSetup_v$VERSION.pkg"
+          pkgutil --check-signature "build/MaderinoPluginSetup_v$VERSION.pkg" || true
+          ls -la build
+
+      - name: Teste l'installation sur ce Mac
+        run: |
+          sudo installer -pkg "build/MaderinoPluginSetup_v$VERSION.pkg" -target / -verboseR
+          DEST="$HOME/Library/Application Support/Adobe/CEP/extensions/$EXT_ID"
+          echo "--- contenu installe"
+          ls -la "$DEST" "$DEST/bin/mac"
+          test -f "$DEST/CSXS/manifest.xml"
+          grep -q "ExtensionBundleVersion=\"$VERSION\"" "$DEST/CSXS/manifest.xml"
+          test -f "$DEST/js/licensing.js"
+          echo "--- proprietaire = utilisateur (pas root), sinon la mise a jour auto echouerait"
+          test "$(stat -f%Su "$DEST/CSXS/manifest.xml")" = "$(id -un)"
+          test "$(stat -f%Su "$HOME/Library/Application Support/Adobe/CEP/extensions")" = "$(id -un)"
+          echo "--- binaires executables"
+          for b in "$DEST"/bin/mac/*; do test -x "$b" || { echo "pas executable: $b"; exit 1; }; done
+          "$DEST/bin/mac/yt-dlp" --version
+          "$DEST/bin/mac/ffmpeg-$( [ "$(uname -m)" = arm64 ] && echo arm64 || echo x64 )" -version | head -1
+          echo "--- PlayerDebugMode"
+          for v in 9 10 11 12 13; do test "$(defaults read com.adobe.CSXS.$v PlayerDebugMode)" = "1"; done
+          echo "--- dossier temporaire nettoye"
+          test ! -e "/Library/Application Support/Maderino Downloader/staging"
+          echo "--- reinstallation par-dessus (mise a jour)"
+          sudo installer -pkg "build/MaderinoPluginSetup_v$VERSION.pkg" -target /
+          test -f "$DEST/CSXS/manifest.xml"
+          echo "TOUT EST OK"
+
+      - name: Ajoute le .pkg a la release
+        run: |
+          gh release upload "plugin-v$VERSION" "build/MaderinoPluginSetup_v$VERSION.pkg" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: MaderinoPluginSetup_v${{ inputs.version }}
+          path: build/*.pkg

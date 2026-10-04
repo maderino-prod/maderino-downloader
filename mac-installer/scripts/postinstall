@@ -1,0 +1,58 @@
+#!/bin/bash
+# Installeur Mac du plugin Maderino Downloader (voir ../README.md).
+#
+# Le .pkg depose les fichiers dans un dossier temporaire systeme (STAGING),
+# puis ce script (lance en root par Installer) les copie dans le dossier
+# d'extensions CEP de l'utilisateur connecte, EN TANT QUE cet utilisateur :
+# le plugin doit pouvoir se mettre a jour lui-meme ensuite (il reecrit son
+# propre dossier, voir onPluginUpdateClick dans js/main.js), ce qui serait
+# impossible dans un dossier appartenant a root.
+
+STAGING="/Library/Application Support/Maderino Downloader/staging/com.maderino.premiere.downloader"
+EXT_ID="com.maderino.premiere.downloader"
+
+log() { echo "[maderino-postinstall] $*"; }
+
+# Utilisateur de la session graphique (Installer tourne en root). Repli sur
+# SUDO_USER pour une installation en ligne de commande (sudo installer ...).
+USER_NAME=$(stat -f%Su /dev/console 2>/dev/null)
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] || [ "$USER_NAME" = "_mbsetupuser" ]; then
+  USER_NAME="$SUDO_USER"
+fi
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+  log "impossible de determiner l'utilisateur connecte"
+  exit 1
+fi
+
+USER_HOME=$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
+  log "dossier personnel introuvable pour $USER_NAME"
+  exit 1
+fi
+
+DEST="$USER_HOME/Library/Application Support/Adobe/CEP/extensions/$EXT_ID"
+log "installation pour $USER_NAME dans $DEST"
+
+as_user() { sudo -u "$USER_NAME" "$@"; }
+
+as_user mkdir -p "$DEST" || exit 1
+# Pas de --delete : on ecrase les fichiers du plugin sans toucher a ce que
+# l'utilisateur aurait pu ajouter (meme comportement que la mise a jour
+# automatique, fs.cpSync).
+as_user rsync -a "$STAGING/" "$DEST/" || exit 1
+
+# Binaires yt-dlp / ffmpeg / deno executables et hors quarantaine Gatekeeper
+# (le plugin le refait aussi a chaque demarrage, voir
+# ensureMacBinariesExecutable).
+as_user chmod 755 "$DEST"/bin/mac/* 2>/dev/null
+as_user xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
+
+# Premiere refuse silencieusement une extension non signee par Adobe sans
+# ce reglage (CSXS 9 a 12 = Premiere 2019 a aujourd'hui, + marge).
+for v in 9 10 11 12 13; do
+  as_user defaults write "com.adobe.CSXS.$v" PlayerDebugMode 1
+done
+
+rm -rf "/Library/Application Support/Maderino Downloader/staging"
+log "termine"
+exit 0
